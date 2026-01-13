@@ -11,4 +11,5 @@ dependencies = [
     "openai-whisper>=20250625",
     "python-fasthtml>=0.12.39",
     "python-multipart>=0.0.21",
+    "moviepy>=1.0.3",
 ]

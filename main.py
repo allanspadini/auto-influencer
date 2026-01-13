@@ -7,6 +7,7 @@ from pathlib import Path
 from starlette.staticfiles import StaticFiles
 import imageio_ffmpeg
 import whisper
+import video_processing
 
 # Setup
 upload_dir = Path("uploads")
@@ -26,7 +27,7 @@ def Layout(content):
             Container(
                 H1("Auto Influencer", cls="text-4xl font-bold mb-4"),
                 Div(content, cls="py-4"),
-                cls="container mx-auto p-4 max-w-7xl"
+                cls="container mx-auto p-4 max-w-[95%]"
             ),
             cls="bg-background text-foreground min-h-screen"
         )
@@ -86,24 +87,12 @@ def perform_cut(video_path: Path, start: float, end: float):
     # Create new filename
     original_name = video_path.stem
     extension = video_path.suffix
-    new_filename = f"{original_name}_cut_{int(start)}_{int(end)}{extension}"
+    new_filename = f"{original_name}_removed_{int(start)}_{int(end)}{extension}"
     output_path = video_path.parent / new_filename
     
-    # FFmpeg cut command
-    # -i input -ss start -to end -c copy output
-    # Note: placing -ss before -i is faster but might be less accurate keyframe-wise. 
-    # For a basic editor, re-encoding might be better for accuracy, but slower.
-
-    # We will use re-encoding to be safe with cuts: -c:v libx264 -c:a aac
-    cmd = [
-        imageio_ffmpeg.get_ffmpeg_exe(), "-y", 
-        "-i", str(video_path),
-        "-ss", str(start),
-        "-to", str(end),
-        "-c:v", "libx264", "-c:a", "aac",
-        str(output_path)
-    ]
-    subprocess.run(cmd, check=True)
+    # Use video_processing logic
+    video_processing.remove_segment(str(video_path), str(output_path), start, end)
+    
     return new_filename
 
 @rt('/cut')
@@ -118,6 +107,56 @@ async def post(filename: str, start: float, end: float):
         return Redirect(f'/editor?filename={new_filename}&parent={filename}')
     except Exception as e:
         return Titled("Error", Div(f"Failed to cut video: {e}"))
+
+@rt('/autocut_silence')
+async def post(filename: str, threshold: float = -30.0):
+    video_path = upload_dir / filename
+    if not video_path.exists():
+        return Titled("Error", Div("Video file not found"))
+    
+    # Generate new filename
+    original_name = video_path.stem
+    extension = video_path.suffix
+    new_filename = f"{original_name}_autocut_{int(abs(threshold))}{extension}"
+    output_path = upload_dir / new_filename
+    
+    try:
+        # Run processing
+        # Note: This is a blocking operation. For production, use background tasks.
+        success = video_processing.remove_silence(str(video_path), str(output_path), threshold_db=threshold)
+        
+        if success:
+            extract_audio(output_path)
+            return Redirect(f'/editor?filename={new_filename}&parent={filename}')
+        else:
+            return Titled("Error", Div("Failed to auto-cut silence."))
+            
+    except Exception as e:
+        print(f"Auto cut error: {e}")
+        return Titled("Error", Div(f"Failed to process video: {e}"))
+
+@rt('/apply_volume')
+async def post(filename: str, factor: float):
+    video_path = upload_dir / filename
+    if not video_path.exists():
+        return Titled("Error", Div("Video file not found"))
+    
+    # Generate new filename
+    original_name = video_path.stem
+    extension = video_path.suffix
+    new_filename = f"{original_name}_vol_{factor}x{extension}"
+    output_path = upload_dir / new_filename
+    
+    try:
+        # Run processing
+        video_processing.adjust_volume(str(video_path), str(output_path), factor)
+        
+        extract_audio(output_path)
+        return Redirect(f'/editor?filename={new_filename}&parent={filename}')
+            
+    except Exception as e:
+        print(f"Volume adjustment error: {e}")
+        return Titled("Error", Div(f"Failed to adjust volume: {e}"))
 
 @rt('/clean')
 def post():
@@ -207,46 +246,91 @@ def get(filename: str, parent: str = None):
             ),
             
             Div(
-                # Left Column: Video Editor
+                # Column 1: Controls
+                Card(
+                    Form(
+                        Hidden(id="filename", name="filename", value=filename),
+                        Div(
+                            Div(
+                                Label("Start Time (s)", cls="label"),
+                                Input(id="start-input", name="start", type="number", step="0.1", value="0", cls="input input-bordered w-full"),
+                                Button("Set Current", type="button", id="set-start-btn", cls="mt-1 " + ButtonT.secondary),
+                                cls="flex flex-col gap-1"
+                            ),
+                            Div(
+                                Label("End Time (s)", cls="label"),
+                                Input(id="end-input", name="end", type="number", step="0.1", value="10", cls="input input-bordered w-full"),
+                                Button("Set Current", type="button", id="set-end-btn", cls="mt-1 " + ButtonT.secondary),
+                                cls="flex flex-col gap-1"
+                            ),
+                            cls="grid grid-cols-2 gap-4 mb-4"
+                        ),
+                        Button("Remove Interval & Preview", cls="w-full " + ButtonT.primary),
+                        hx_post="/cut", hx_target="body", hx_indicator="#processing-indicator"
+                    ),
+                    Form(
+                        Hidden(name="filename", value=filename),
+                        Div(
+                            Label("Silence Sensitivity (dB)", cls="label"),
+                            Div(
+                                Input(type="range", name="threshold", min="-60", max="-10", value="-30", step="1", 
+                                      cls="range range-primary w-full", oninput="this.nextElementSibling.value = this.value + ' dB'"),
+                                Output("-30 dB", cls="text-sm font-bold ml-2 w-16"),
+                                cls="flex items-center gap-2"
+                            ),
+                            P("Higher (closer to 0) = remove more noise (aggressive). Lower = keep more sound.", cls="text-xs text-muted-foreground mt-1"),
+                            cls="mb-2"
+                        ),
+                        Button("Auto Cut Silence (AI)", 
+                               cls="w-full " + ButtonT.primary + " mt-2 bg-purple-600 hover:bg-purple-700"),
+                        hx_post="/autocut_silence", hx_target="body", hx_indicator="#processing-indicator"
+                    ),
+                    Form(
+                        Hidden(name="filename", value=filename),
+                        Div(
+                            Label("Audio Gain (Volume)", cls="label"),
+                            Div(
+                                Input(type="range", name="factor", min="0.5", max="3.0", value="1.0", step="0.1", 
+                                      cls="range range-accent w-full", oninput="this.nextElementSibling.value = this.value + 'x'"),
+                                Output("1.0x", cls="text-sm font-bold ml-2 w-16"),
+                                cls="flex items-center gap-2"
+                            ),
+                            P("Increase or decrease audio volume permanently.", cls="text-xs text-muted-foreground mt-1"),
+                            cls="mb-2"
+                        ),
+                        Button("Apply Volume", 
+                               cls="w-full " + ButtonT.secondary + " mt-2"), 
+                        hx_post="/apply_volume", hx_target="body", hx_indicator="#processing-indicator"
+                    ),
+                    Div(
+                        A("Undo Last Cut", href=f"/editor?filename={parent}", cls="w-full " + ButtonT.destructive + " text-center block h-12 flex items-center justify-center") if parent else None,
+                        A("Download Video", href=video_url, download=filename, cls="w-full " + ButtonT.secondary + " text-center block h-12 flex items-center justify-center"),
+                        cls="flex flex-col gap-2 mt-2"
+                    ),
+                    Div(
+                        Loading(cls=LoadingT.dots, htmx_indicator=True),
+                        Span(" Processing video... please wait.", cls="ml-2 text-sm text-muted-foreground"),
+                        id="processing-indicator",
+                        cls="htmx-indicator mt-4 flex items-center justify-center p-2 bg-gray-100 dark:bg-gray-800 rounded"
+                    ),
+                    cls="p-4 h-fit leading-normal"
+                ),
+
+                # Column 2: Video Editor (Center)
                 Div(
                     # Video Player
-                    Video(src=video_url, controls=True, id="video-player", cls="w-full rounded-lg shadow-lg mb-4"),
+                    Div(
+                        Video(src=video_url, controls=True, id="video-player", cls="max-h-full max-w-full rounded-lg shadow-lg"),
+                        cls="w-full h-[600px] bg-black flex items-center justify-center rounded-lg overflow-hidden mb-4"
+                    ),
                     
                     # Waveform Container
                     Div(id="waveform", cls="w-full bg-card p-4 rounded-lg shadow-inner mb-4"),
                     
-                    # Controls area
-                    Card(
-                        Form(
-                            Hidden(id="filename", name="filename", value=filename),
-                            Div(
-                                Div(
-                                    Label("Start Time (s)", cls="label"),
-                                    Input(id="start-input", name="start", type="number", step="0.1", value="0", cls="input input-bordered w-full"),
-                                    Button("Set Current", type="button", id="set-start-btn", cls="mt-1 " + ButtonT.secondary),
-                                    cls="flex flex-col gap-1"
-                                ),
-                                Div(
-                                    Label("End Time (s)", cls="label"),
-                                    Input(id="end-input", name="end", type="number", step="0.1", value="10", cls="input input-bordered w-full"),
-                                    Button("Set Current", type="button", id="set-end-btn", cls="mt-1 " + ButtonT.secondary),
-                                    cls="flex flex-col gap-1"
-                                ),
-                                cls="grid grid-cols-2 gap-4 mb-4"
-                            ),
-                            Button("Cut & Preview", cls="w-full " + ButtonT.primary),
-                            action="/cut", method="post"
-                        ),
-                        Div(
-                            A("Undo Last Cut", href=f"/editor?filename={parent}", cls="w-full " + ButtonT.destructive + " text-center block h-12 flex items-center justify-center") if parent else None,
-                            A("Download Video", href=video_url, download=filename, cls="w-full " + ButtonT.secondary + " text-center block h-12 flex items-center justify-center"),
-                            cls="flex flex-col gap-2 mt-2"
-                        ),
-                        cls="p-4"
-                    ),
                     cls="col-span-2"
                 ),
-                # Right Column: Transcription
+                
+                # Column 3: Transcription (Right)
                 Card(
                      H3("Transcription", cls="text-xl font-bold mb-4"),
                      Button("Transcribe Audio", 
@@ -263,7 +347,7 @@ def get(filename: str, parent: str = None):
                      Div(id="transcription-result", cls="min-h-[200px]"),
                      cls="col-span-1 h-fit"
                 ),
-                cls="grid grid-cols-1 lg:grid-cols-3 gap-6"
+                cls="grid grid-cols-1 lg:grid-cols-4 gap-6"
             ),
 
             # Application State/Scripts
@@ -300,10 +384,10 @@ def get(filename: str, parent: str = None):
                 
                 // Set Start/End Buttons
                 document.getElementById('set-start-btn').onclick = () => {{
-                    document.getElementById('start-input').value = video.currentTime.toFixed(2);
+                    document.getElementById('start-input').value = video.currentTime.toFixed(1);
                 }};
                 document.getElementById('set-end-btn').onclick = () => {{
-                    document.getElementById('end-input').value = video.currentTime.toFixed(2);
+                    document.getElementById('end-input').value = video.currentTime.toFixed(1);
                 }};
 
                 // Robust Copy Function
