@@ -4,6 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
+authors = [
+    {name = "Allan Spadini"}
+]
+license = {file = "LICENSE"}
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = [
     "imageio-ffmpeg>=0.6.0",
     "monsterui>=1.0.36",
@@ -12,4 +19,9 @@ dependencies = [
     "python-fasthtml>=0.12.39",
     "python-multipart>=0.0.21",
     "moviepy>=1.0.3",
+    "pywebview>=6.1",
+    "uvicorn>=0.40.0",
+    "pyqt6>=6.10.2",
+    "qtpy>=2.4.3",
+    "pyqt6-webengine>=6.10.0",
 ]
